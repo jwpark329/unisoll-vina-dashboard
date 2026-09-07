@@ -294,10 +294,16 @@ a{color:inherit;text-decoration:none}
 .dept-sb-nav::-webkit-scrollbar{width:5px}
 .dept-sb-nav::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}
 .sb-group-label{
+  display:flex;align-items:center;justify-content:space-between;gap:8px;
   font-size:11px;font-weight:800;letter-spacing:1.4px;color:var(--txt-3);
   padding:15px 10px 7px;text-transform:uppercase;
 }
 .sb-group-label:first-child{padding-top:4px}
+.sb-group-label .sgl-edit{
+  font-size:11px;font-weight:700;letter-spacing:0;text-transform:none;
+  color:var(--txt-3);opacity:.6;padding:2px 5px;border-radius:5px;flex-shrink:0;
+}
+.sb-group-label .sgl-edit:hover{opacity:1;background:var(--bg);color:var(--blue)}
 .sb-menu{
   display:flex;align-items:center;gap:11px;width:100%;
   padding:10px 12px;border-radius:10px;font-size:13.8px;font-weight:500;
@@ -934,6 +940,34 @@ const GROUP_ICONS = {
   '출고관리 · Shipping': '🚚',
   '기타관리 · HR': '🗂️',
 };
+const STANDARD_GROUPS = Object.keys(GROUP_ICONS);
+/* 이 7개 그룹이 항상 존재해야 하는 부서(1~7공장). 워싱/창고/관리부서는 대상 아님. */
+const FACTORY_DEPT_IDS = ['fty1','fty2','fty3','fty4','fty6','fty7'];
+
+/* 파일 기본값이든 Supabase에서 불러온 값이든 상관없이, 대상 부서엔 표준 7개 그룹이
+   항상 존재하도록 보정합니다. 이미 있는 그룹(표준이든 커스텀이든)의 항목은 그대로
+   유지하고, 빠진 표준 그룹만 빈 배열로 추가합니다. 표준에 없는 커스텀 그룹은
+   표준 7개 뒤쪽에 그대로 남겨둡니다. 실제로 뭔가 추가된 경우에만 true를 반환합니다. */
+function ensureStandardGroups(dept){
+  const existing = new Map(dept.menus.map(g => [g.group, g]));
+  let addedAny = false;
+  const standardPart = STANDARD_GROUPS.map(name => {
+    if (existing.has(name)) return existing.get(name);
+    addedAny = true;
+    return { group: name, items: [] };
+  });
+  const customPart = dept.menus.filter(g => !STANDARD_GROUPS.includes(g.group));
+  dept.menus = [...standardPart, ...customPart];
+  return addedAny;
+}
+function ensureAllFactoryGroups(){
+  let changed = false;
+  FACTORY_DEPT_IDS.forEach(id => {
+    const dept = findDeptRaw(id);
+    if (dept && ensureStandardGroups(dept)) changed = true;
+  });
+  return changed;
+}
 
 /* ═══════════════════════════════════════════════════════════
    라우팅 (해시 기반 · 딥링크/새로고침 유지)
@@ -1240,8 +1274,11 @@ function renderDeptMenus(activeId){
        관리자 모드에서는 항목을 채워 넣을 수 있도록 빈 그룹도 그대로 보여줌. */
     if (!isAdminMode && g.items.length === 0) return '';
     const groupIcon = GROUP_ICONS[g.group];
+    const groupLabel = isAdminMode
+      ? `<div class="sb-group-label"><span>${esc(g.group)}</span><button class="sgl-edit" title="그룹 이름 수정" onclick="renameGroup('${deptId}',${gi})">✎</button></div>`
+      : `<div class="sb-group-label">${esc(g.group)}</div>`;
     return `
-    <div class="sb-group-label">${esc(g.group)}</div>
+    ${groupLabel}
     ${g.items.map(m => {
       const disabled = !m.url;
       const adminBtns = isAdminMode ? `
@@ -1701,6 +1738,30 @@ function addGroup(deptId){
   afterConfigMutate(snapshot);
 }
 
+/* ─────────── 메뉴 그룹 이름 수정 ─────────── */
+function renameGroup(deptId, groupIdx){
+  const dept = findDeptRaw(deptId);
+  if (!dept) return;
+  const group = dept.menus[groupIdx];
+  if (!group) return;
+  const hint = '\n\n표준 그룹 이름과 정확히 똑같이 입력하면 그 그룹에 자동으로 합쳐집니다:\n' + STANDARD_GROUPS.join(' / ');
+  const input = prompt('그룹 이름을 입력하세요.' + hint, group.group);
+  if (input === null) return;
+  const trimmed = input.trim();
+  if (!trimmed || trimmed === group.group) return;
+
+  const snapshot = snapshotConfig();
+  const target = dept.menus.find((g, i) => i !== groupIdx && g.group === trimmed);
+  if (target) {
+    /* 이미 같은 이름의 그룹이 있으면, 항목만 그 그룹으로 옮기고 지금 그룹은 없앰 */
+    target.items = target.items.concat(group.items);
+    dept.menus.splice(groupIdx, 1);
+  } else {
+    group.group = trimmed;
+  }
+  afterConfigMutate(snapshot);
+}
+
 /* APP_CONFIG 원본 참조로 부서를 찾는 헬퍼 (allDepts()는 복사본을 반환하므로 직접 순회) */
 function findDeptRaw(deptId){
   for (const s of APP_CONFIG.sections) {
@@ -1782,9 +1843,11 @@ function deleteMenuConfirm(){
 ═══════════════════════════════════════════════════════════ */
 (async function initAdmin(){
   await initSupabase(false);
+  const changed = ensureAllFactoryGroups();  /* 1~7공장에 표준 7개 그룹이 없으면 지금 채워넣음 */
   renderHubCards();
   renderHubNav($('hubSearch').value);
   updateOfflineBadges();
+  if (changed && sbClient) await saveConfigToSupabase();  /* 보정된 구조를 그대로 저장해서 다음부턴 반복 안 되게 함 */
 })();
 </script>
 </body>
