@@ -294,16 +294,26 @@ a{color:inherit;text-decoration:none}
 .dept-sb-nav::-webkit-scrollbar{width:5px}
 .dept-sb-nav::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}
 .sb-group-label{
-  display:flex;align-items:center;justify-content:space-between;gap:8px;
+  display:flex;align-items:center;gap:6px;
   font-size:11px;font-weight:800;letter-spacing:1.4px;color:var(--txt-3);
   padding:15px 10px 7px;text-transform:uppercase;
 }
 .sb-group-label:first-child{padding-top:4px}
+.sb-group-label .sgl-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sb-group-label .sgl-actions{margin-left:auto;display:flex;gap:2px;flex-shrink:0}
 .sb-group-label .sgl-edit{
   font-size:11px;font-weight:700;letter-spacing:0;text-transform:none;
-  color:var(--txt-3);opacity:.6;padding:2px 5px;border-radius:5px;flex-shrink:0;
+  color:var(--txt-3);opacity:.6;padding:2px 5px;border-radius:5px;
 }
 .sb-group-label .sgl-edit:hover{opacity:1;background:var(--bg);color:var(--blue)}
+.sb-group-label .sgl-edit.danger:hover{color:#c0392b}
+.sb-group-label .sgl-handle{
+  cursor:grab;color:var(--txt-3);font-size:12px;line-height:1;opacity:.6;text-transform:none;letter-spacing:0;
+}
+.sb-group-label .sgl-handle:active{cursor:grabbing}
+.sb-group-block{border-radius:8px;transition:background .1s}
+.sb-group-block.dragging{opacity:.4}
+.sb-group-block.drag-over{box-shadow:inset 0 2px 0 var(--blue);background:var(--blue-soft)}
 .sb-menu{
   display:flex;align-items:center;gap:11px;width:100%;
   padding:10px 12px;border-radius:10px;font-size:13.8px;font-weight:500;
@@ -944,21 +954,16 @@ const STANDARD_GROUPS = Object.keys(GROUP_ICONS);
 /* 이 7개 그룹이 항상 존재해야 하는 부서(1~7공장). 워싱/창고/관리부서는 대상 아님. */
 const FACTORY_DEPT_IDS = ['fty1','fty2','fty3','fty4','fty6','fty7'];
 
-/* 파일 기본값이든 Supabase에서 불러온 값이든 상관없이, 대상 부서엔 표준 7개 그룹이
-   항상 존재하도록 보정합니다. 이미 있는 그룹(표준이든 커스텀이든)의 항목은 그대로
-   유지하고, 빠진 표준 그룹만 빈 배열로 추가합니다. 표준에 없는 커스텀 그룹은
-   표준 7개 뒤쪽에 그대로 남겨둡니다. 실제로 뭔가 추가된 경우에만 true를 반환합니다. */
+/* 파일 기본값이든 Supabase에서 불러온 값이든 상관없이, 표준 그룹이 "한 번도 세팅된 적
+   없는" 부서에만 최초 1회 7개 그룹을 스캐폴딩합니다. 표준 그룹이 하나라도 이미 있다면
+   (이전에 세팅됐다는 뜻) 이후엔 손대지 않습니다 — 관리자가 특정 그룹을 의도적으로
+   삭제했을 수 있으니, 자동 보정이 그 삭제를 계속 되살리지 않도록 하기 위함입니다. */
 function ensureStandardGroups(dept){
-  const existing = new Map(dept.menus.map(g => [g.group, g]));
-  let addedAny = false;
-  const standardPart = STANDARD_GROUPS.map(name => {
-    if (existing.has(name)) return existing.get(name);
-    addedAny = true;
-    return { group: name, items: [] };
-  });
-  const customPart = dept.menus.filter(g => !STANDARD_GROUPS.includes(g.group));
-  dept.menus = [...standardPart, ...customPart];
-  return addedAny;
+  const hasAnyStandard = dept.menus.some(g => STANDARD_GROUPS.includes(g.group));
+  if (hasAnyStandard) return false;
+  const customPart = dept.menus.slice();
+  dept.menus = [...STANDARD_GROUPS.map(name => ({ group: name, items: [] })), ...customPart];
+  return true;
 }
 function ensureAllFactoryGroups(){
   let changed = false;
@@ -1208,7 +1213,7 @@ let navDrag = null;  /* { kind:'section', fromIdx } | { kind:'dept', sectionId, 
 function navDragOver(e){ e.preventDefault(); e.currentTarget.classList.add('drag-over'); }
 function navDeptDragOver(e){ e.preventDefault(); e.stopPropagation(); e.currentTarget.classList.add('drag-over'); }
 function navDragLeave(e){ e.currentTarget.classList.remove('drag-over'); }
-function navDragEnd(e){ const row = e.currentTarget.closest('.nav-group, .nav-sub'); if (row) row.classList.remove('dragging'); }
+function navDragEnd(e){ const row = e.currentTarget.closest('.nav-group, .nav-sub, .sb-group-block'); if (row) row.classList.remove('dragging'); }
 
 function navSectionDragStart(e, fromIdx){
   navDrag = { kind: 'section', fromIdx };
@@ -1274,10 +1279,23 @@ function renderDeptMenus(activeId){
        관리자 모드에서는 항목을 채워 넣을 수 있도록 빈 그룹도 그대로 보여줌. */
     if (!isAdminMode && g.items.length === 0) return '';
     const groupIcon = GROUP_ICONS[g.group];
+    const handle = isAdminMode
+      ? `<span class="sgl-handle" draggable="true"
+           ondragstart="groupDragStart(event,'${deptId}',${gi})" ondragend="navDragEnd(event)"
+           onclick="event.stopPropagation()" title="드래그해서 순서 변경">⠿</span>` : '';
     const groupLabel = isAdminMode
-      ? `<div class="sb-group-label"><span>${esc(g.group)}</span><button class="sgl-edit" title="그룹 이름 수정" onclick="renameGroup('${deptId}',${gi})">✎</button></div>`
+      ? `<div class="sb-group-label">
+           ${handle}<span class="sgl-text">${esc(g.group)}</span>
+           <span class="sgl-actions">
+             <button class="sgl-edit" title="그룹 이름 수정" onclick="renameGroup('${deptId}',${gi})">✎</button>
+             <button class="sgl-edit danger" title="그룹 삭제" onclick="deleteGroup('${deptId}',${gi})">🗑</button>
+           </span>
+         </div>`
       : `<div class="sb-group-label">${esc(g.group)}</div>`;
+    const dropAttrs = isAdminMode
+      ? `ondragover="groupDragOver(event)" ondragleave="navDragLeave(event)" ondrop="groupDrop(event,'${deptId}',${gi})"` : '';
     return `
+    <div class="sb-group-block" ${dropAttrs}>
     ${groupLabel}
     ${g.items.map(m => {
       const disabled = !m.url;
@@ -1298,6 +1316,7 @@ function renderDeptMenus(activeId){
     }).join('')}
     ${isAdminMode && g.items.length === 0 ? `<div class="nav-empty" style="padding:4px 10px 8px;text-align:left">아직 메뉴가 없습니다</div>` : ''}
     ${isAdminMode ? `<div class="sb-add-row"><button onclick="openMenuForm('${deptId}',${gi})">＋ 메뉴 추가</button></div>` : ''}
+    </div>
   `;
   }).join('') + (isAdminMode ? `<div class="sb-add-row"><button onclick="addGroup('${deptId}')">＋ 메뉴 그룹 추가</button></div>` : '');
 }
@@ -1760,6 +1779,46 @@ function renameGroup(deptId, groupIdx){
     group.group = trimmed;
   }
   afterConfigMutate(snapshot);
+}
+
+/* ─────────── 메뉴 그룹 삭제 ─────────── */
+function deleteGroup(deptId, groupIdx){
+  const dept = findDeptRaw(deptId);
+  if (!dept) return;
+  const group = dept.menus[groupIdx];
+  if (!group) return;
+  const msg = group.items.length
+    ? `"${group.group}" 그룹을 삭제하시겠습니까?\n이 안에 있는 메뉴 ${group.items.length}개도 함께 삭제됩니다.`
+    : `"${group.group}" 그룹을 삭제하시겠습니까?`;
+  if (!confirm(msg)) return;
+  const snapshot = snapshotConfig();
+  const hadCurMenu = curMenu && group.items.some(m => m.id === curMenu.id);
+  dept.menus.splice(groupIdx, 1);
+  if (hadCurMenu) go('/' + deptId);
+  afterConfigMutate(snapshot);
+}
+
+/* ─────────── 메뉴 그룹 순서 변경 (드래그, 같은 부서 안에서만) ─────────── */
+let groupDrag = null;  /* { deptId, fromIdx } */
+function groupDragStart(e, deptId, fromIdx){
+  groupDrag = { deptId, fromIdx };
+  const block = e.currentTarget.closest('.sb-group-block');
+  if (block) block.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+  e.stopPropagation();
+}
+function groupDragOver(e){ e.preventDefault(); e.currentTarget.classList.add('drag-over'); }
+async function groupDrop(e, deptId, toIdx){
+  e.preventDefault();
+  e.currentTarget.classList.remove('drag-over');
+  if (!groupDrag || groupDrag.deptId !== deptId || groupDrag.fromIdx === toIdx) { groupDrag = null; return; }
+  const dept = findDeptRaw(deptId);
+  if (!dept) { groupDrag = null; return; }
+  const snapshot = snapshotConfig();
+  const [moved] = dept.menus.splice(groupDrag.fromIdx, 1);
+  dept.menus.splice(toIdx, 0, moved);
+  groupDrag = null;
+  await afterConfigMutate(snapshot);
 }
 
 /* APP_CONFIG 원본 참조로 부서를 찾는 헬퍼 (allDepts()는 복사본을 반환하므로 직접 순회) */
